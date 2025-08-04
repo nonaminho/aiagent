@@ -4,52 +4,73 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from functions.caller import available_functions, call_function
+from prompts import system_prompt
+from functions.config import MAX_ITERS
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: uv run main.py PROMPT")
-        sys.exit(1)
     load_dotenv()
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key = api_key)
-    model_name = 'gemini-2.0-flash-001'
-    user_prompt = sys.argv[1]
 
     verbose = "--verbose" in sys.argv
+    args = []
+    for arg in sys.argv[1:]:
+        if not arg.startswith("--"):
+            args.append(arg)
 
+    if not args:
+        print("AI Code Assistant")
+        print('\nUsage: python main.py "your prompt here" [--verbose]')
+        print('Example: python main.py "How do I fix the calculator?"')
+        sys.exit(1)
 
-    system_prompt = """
-    You are a helpful AI coding agent.
+    api_key = os.environ.get("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
 
-    When a user asks a question or makes a request, make a function call plan. You can perform the following operations:
+    user_prompt = " ".join(args)
 
-    - List files and directories
-    - Read file contents
-    - Execute Python files with optinal arguments
-    - Write or overwrite files
-
-    All paths you provide should be relative to the working directory. You do not need to specify the working directory in your function calls as it is automatically injected for security reasons.
-    """
+    if verbose:
+        print(f"User prompt: {user_prompt}\n")
 
     messages = [
-        types.Content(role = "user", parts=[types.Part(text=user_prompt)]),
+        types.Content(role="user", parts=[types.Part(text=user_prompt)]),
     ]
-    
+
+    iters = 0
+    while True:
+        iters += 1
+        if iters > MAX_ITERS:
+            print(f"Maximum iterations ({MAX_ITERS}) reached.")
+            sys.exit(1)
+
+        try:
+            final_response = generate_content(client, messages, verbose)
+            if final_response:
+                print("Final response:")
+                print(final_response)
+                break
+        except Exception as e:
+            print(f"Error in generate_content: {e}")
+
+
+def generate_content(client, messages, verbose):
     response = client.models.generate_content(
-        model= model_name,
+        model="gemini-2.0-flash-001",
         contents=messages,
         config=types.GenerateContentConfig(
-        tools=[available_functions], system_instruction=system_prompt,
-        )
+            tools=[available_functions], system_instruction=system_prompt
+        ),
     )
     if verbose:
-        print(f"User prompt: {user_prompt}")
-        print(f"Prompt tokens: {response.usage_metadata.prompt_token_count}")
-        print(f"Response tokens: {response.usage_metadata.candidates_token_count}")
-        print()
+        print("Prompt tokens:", response.usage_metadata.prompt_token_count)
+        print("Response tokens:", response.usage_metadata.candidates_token_count)
+
+    if response.candidates:
+        for candidate in response.candidates:
+            function_call_content = candidate.content
+            messages.append(function_call_content)
+
     if not response.function_calls:
-        print(f"Response:\n{response.text}")
-    
+        return response.text
+
     function_responses = []
     for function_call_part in response.function_calls:
         function_call_result = call_function(function_call_part, verbose)
@@ -64,6 +85,8 @@ def main():
 
     if not function_responses:
         raise Exception("no function responses generated, exiting.")
+
+    messages.append(types.Content(role="tool", parts=function_responses))
 
 
 if __name__ == "__main__":
